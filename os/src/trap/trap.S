@@ -10,11 +10,13 @@
     .globl __restore
     .align 2
 __alltraps:
+    # 交换 sp和sscratch
     csrrw sp, sscratch, sp
     # now sp->kernel stack, sscratch->user stack
     # allocate a TrapContext on kernel stack
     addi sp, sp, -34*8
     # save general-purpose registers
+    # 寄存器 x1 的值存储到栈指针 sp 的地址加上 8 字节的偏移量的位置
     sd x1, 1*8(sp)
     # skip sp(x2), we will save it later
     sd x3, 3*8(sp)
@@ -26,6 +28,7 @@ __alltraps:
         .set n, n+1
     .endr
     # we can use t0/t1/t2 freely, because they were saved on kernel stack
+    # 将 CSR 的值写入到 t0 寄存器中
     csrr t0, sstatus
     csrr t1, sepc
     sd t0, 32*8(sp)
