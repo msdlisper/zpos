@@ -17,6 +17,7 @@ mod task;
 
 use crate::config::MAX_APP_NUM;
 use crate::loader::{get_num_app, init_app_cx};
+use crate::sbi::shutdown;
 use crate::sync::UPSafeCell;
 use lazy_static::*;
 use switch::__switch;
@@ -105,7 +106,7 @@ impl TaskManager {
         inner.tasks[current].task_status = TaskStatus::Exited;
     }
 
-    /// Find next task to run and return app id.
+    /// Find next task to run and return task id.
     ///
     /// In this case, we only return the first `Ready` task in task list.
     fn find_next_task(&self) -> Option<usize> {
@@ -134,8 +135,7 @@ impl TaskManager {
             // go back to user mode
         } else {
             println!("All applications completed!");
-            use crate::board::QEMUExit;
-            crate::board::QEMU_EXIT_HANDLE.exit_success();
+            shutdown(false);
         }
     }
 }
