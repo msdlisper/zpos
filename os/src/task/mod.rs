@@ -15,10 +15,12 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+
 use crate::config::MAX_APP_NUM;
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sbi::shutdown;
 use crate::sync::UPSafeCell;
+use crate::timer::{get_time_ms, get_time_us};
 use lazy_static::*;
 use switch::__switch;
 use task::{TaskControlBlock, TaskStatus};
@@ -47,6 +49,19 @@ pub struct TaskManagerInner {
     tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
+    stop_watch: usize,
+    switch_time_start: usize,
+    switch_time_all: usize,
+
+    app_time_start: usize,
+}
+
+impl TaskManagerInner {
+    fn refresh_stop_watch(&mut self) -> usize {
+        let start_time = self.stop_watch;
+        self.stop_watch = get_time_ms();
+        self.stop_watch - start_time
+    }
 }
 
 lazy_static! {
@@ -56,6 +71,8 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            kernel_time: 0,
+            user_time: 0,
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
@@ -67,6 +84,10 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    stop_watch: 0,
+                    switch_time_start: 0,
+                    switch_time_all: 0,
+                    app_time_start: get_time_ms()
                 })
             },
         }
@@ -83,12 +104,12 @@ impl TaskManager {
         let task0 = &mut inner.tasks[0];
         task0.task_status = TaskStatus::Running;
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
+        // 开始记录时间
+        inner.refresh_stop_watch();
         drop(inner);
         let mut _unused = TaskContext::zero_init();
         // before this, we should drop local variables that must be dropped manually
-        unsafe {
-            __switch(&mut _unused as *mut TaskContext, next_task_cx_ptr);
-        }
+        self.switch(&mut _unused as *mut TaskContext, next_task_cx_ptr);
         panic!("unreachable in run_first_task!");
     }
 
@@ -96,6 +117,8 @@ impl TaskManager {
     fn mark_current_suspended(&self) {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
+        // 统计内核时间
+        inner.tasks[current].kernel_time += inner.refresh_stop_watch();
         inner.tasks[current].task_status = TaskStatus::Ready;
     }
 
@@ -103,6 +126,9 @@ impl TaskManager {
     fn mark_current_exited(&self) {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
+        // 统计内核时间并输出
+        inner.tasks[current].kernel_time += inner.refresh_stop_watch();
+        println!("[task {} exited. user_time: {} ms, kernle_time: {} ms.", current, inner.tasks[current].user_time, inner.tasks[current].kernel_time);
         inner.tasks[current].task_status = TaskStatus::Exited;
     }
 
@@ -129,17 +155,62 @@ impl TaskManager {
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
             drop(inner);
             // before this, we should drop local variables that must be dropped manually
-            unsafe {
-                __switch(current_task_cx_ptr, next_task_cx_ptr);
-            }
+            self.switch(current_task_cx_ptr, next_task_cx_ptr);
             // go back to user mode
         } else {
             println!("All applications completed!");
+            println!("app all time: {} us", get_time_ms() - self.get_app_start_time());
+            println!("task switch time: {} us", self.get_switch_time_count());
             shutdown(false);
         }
     }
+
+    fn switch(&self, current_task_cx_ptr: *mut TaskContext, next_task_cx_ptr: *const TaskContext) {
+        let mut inner = self.inner.exclusive_access();
+        inner.switch_time_start = get_time_us();
+        drop(inner);
+        unsafe {
+            __switch(current_task_cx_ptr, next_task_cx_ptr);
+        }
+        let mut inner2 = self.inner.exclusive_access();
+        inner2.switch_time_all += get_time_us() - inner2.switch_time_start;
+    }
+
+    fn get_switch_time_count(&self) -> usize {
+        let inner = self.inner.read_access();
+        inner.switch_time_all
+    }
+
+    fn get_app_start_time(&self) -> usize {
+        let inner = self.inner.read_access();
+        inner.app_time_start
+    }
+
+
+    fn user_time_start(&self) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].kernel_time += inner.refresh_stop_watch();
+    }
+    
+    /// 统计用户时间，从现在开始算的是内核时间
+    fn user_time_end(&self) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].user_time += inner.refresh_stop_watch();
+    }
 }
 
+
+/// 统计内核时间，从现在开始算的是用户时间
+pub fn user_time_start() {
+    TASK_MANAGER.user_time_start()
+}
+
+/// 统计用户时间，从现在开始算的是内核时间
+pub fn user_time_end() {
+    TASK_MANAGER.user_time_end()
+}
 /// run first task
 pub fn run_first_task() {
     TASK_MANAGER.run_first_task();
